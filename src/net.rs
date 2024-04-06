@@ -12,16 +12,16 @@ use futures::{Stream, StreamExt};
 pub enum Message {
     Handshake {
         id: u16,
-        // state: State,
+        leader: Option<u16>,
     },
     Propose {
         id: u16,
     },
-    Vote {
+    Victory {
         id: u16,
     },
-    Follow {
-        follower: u16,
+    Refused {
+        highest: u16,
     },
 }
 
