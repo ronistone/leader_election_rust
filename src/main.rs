@@ -1,21 +1,9 @@
-mod net;
-mod internal_communication;
-
 extern crate core;
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::io::ErrorKind;
-use std::sync::{Arc};
-use tokio::net::{TcpListener, TcpStream};
 use clap::Parser;
-use futures::SinkExt;
-use serde::{Deserialize, Serialize};
-use crate::net::{Message, message_split, MessageReader, MessageWriter};
-use futures::stream::{FuturesOrdered, StreamExt};
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::RwLock;
-use crate::internal_communication::InternalMessage;
+
+mod algorithms;
+mod communication;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -28,23 +16,6 @@ struct Args {
     peers: Vec<u16>,
 
 }
-
-
-#[derive(Debug, Serialize, Deserialize)]
-enum State{
-    Primary,
-    Follower,
-    Candidate,
-}
-
-struct Node {
-    id: u16,
-    state: State,
-    peers_ports: Vec<u16>,
-    leader: Option<u16>,
-    peers_channels: HashMap<u16, Sender<InternalMessage>>,
-}
-
 
 #[tokio::main]
 async fn main() {
@@ -60,199 +31,211 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let node = Arc::new(RwLock::new(
-        Node {
-            id: args.port,
-            state: State::Candidate,
-            leader: None,
-            peers_ports: args.peers,
-            peers_channels: HashMap::new(),
-        }
-    ));
-
-    let address = format!("0.0.0.0:{}", args.port);
-    println!("Listening on {}", address);
-    let listener = TcpListener::bind(address).await.unwrap();
-
-    let (channel_tx, channel_rx) = tokio::sync::mpsc::channel::<InternalMessage>(100);
-
-    let coordinate_spawn = tokio::spawn(coordinate_internal_communication(channel_rx, node.clone()));
-    let accept_spawn = tokio::spawn(accept_connections(listener, channel_tx.clone(), node.clone()));
-    let peers_connections = tokio::spawn(start_peers_connections(channel_tx, node.clone()));
-
-    tokio::join!(coordinate_spawn, accept_spawn, peers_connections);
+    algorithms::bully::init_cluster(args.port, args.peers).await;
 }
 
-async fn start_peers_connections(channel_tx: Sender<InternalMessage>, node: Arc<RwLock<Node>>) {
-    let peers: Vec<u16>;
-    {
-        let node_lock = node.read().await;
-        peers = node_lock.peers_ports.clone();
-    }
-    for peer in peers.iter() {
-        let p = peer.clone();
-        let channel = channel_tx.clone();
-        let n = node.clone();
-        tokio::spawn(async move {
-            let peer_address = format!("127.0.0.1:{}", p);
-            println!("Connecting to {}", peer_address);
-            match TcpStream::connect(peer_address.clone()).await {
-                Ok(socket) => {
-                    handle_connection(socket, channel, n).await;
-                }
-                Err(err) => {
-                    println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
-                    channel.send(InternalMessage::ConnectionFailed { peer: p }).await.unwrap();
-                }
-            };
-        });
-    }
-}
+// async fn start_peers_connections(channel_tx: Sender<InternalMessage>, node: Arc<RwLock<Node>>) {
+//
+//     let _ = channel_tx.send(InternalMessage::StartElection{}).await;
+// }
 
-async fn handle_connection(socket: TcpStream, coordinate_channel: Sender<InternalMessage>, node: Arc<RwLock<Node>>) {
-    let (mut rx, mut tx) = message_split(socket);
-    match handle_handshake(&mut rx, &mut tx, node.clone()).await {
-        Ok(channel_rx) => {
-            tokio::spawn(process(rx, tx, coordinate_channel.clone(), channel_rx, 0));
-        },
-        Err(err) => {
-            eprintln!("Error handling handshake: {:?}", err);
-        }
-    }
-}
+// async fn coordinate_internal_communication(mut channel_rx: Receiver<InternalMessage>, node: Arc<RwLock<Node>>) -> Result<(), ErrorKind>{
+//     let mut failed = 0;
+//     loop {
+//         let message = channel_rx.recv().await.unwrap();
+//         match message {
+//             InternalMessage::StartElection {} =>  {
+//                 println!("Starting Election!");
+//                 {
+//                     let mut node_lock = node.write().await;
+//                     node_lock.state = State::Candidate;
+//                     node_lock.leader = Some(node_lock.id);
+//                     let mut is_high_peer = true;
+//                     for (peer, channel) in node_lock.peers_channels.iter() {
+//                         if *peer > node_lock.id {
+//                             channel.send(InternalMessage::StartElection {}).await.unwrap();
+//                             is_high_peer = false;
+//                         }
+//                     }
+//                     if is_high_peer {
+//                         println!("I am the leader!");
+//                         node_lock.state = State::Primary;
+//                         for (_, channel) in node_lock.peers_channels.iter() {
+//                             channel.send(InternalMessage::Victory {}).await.unwrap();
+//                         }
+//                     }
+//                 }
+//             },
+//             InternalMessage::PeerAlive { peer } => {
+//                 {
+//                     let mut node_lock = node.write().await;
+//                     if node_lock.state == State::Candidate {
+//                         node_lock.state = State::Follower;
+//                         node_lock.leader = Some(peer);
+//                     }
+//                 }
+//             },
+//             InternalMessage::LeaderElected { leader } => {
+//                 {
+//                     let mut node_lock = node.write().await;
+//                     node_lock.state = State::Follower;
+//                     node_lock.leader = Some(leader);
+//                 }
+//                 println!("New Leader elected: {}", leader);
+//             },
+//             InternalMessage::ConnectionFailed { peer: _peer } => {
+//                 failed += 1;
+//                 if failed == node.read().await.peers_ports.len() {
+//                     println!("All connections failed");
+//                 }
+//             },
+//             InternalMessage::ConnectionBroken { peer } => {
+//                 if peer == node.read().await.leader.unwrap() {
+//                     println!("Connection broken with leader!\nStarting Election!")
+//                 }
+//             }
+//
+//             _ => {
+//                 break
+//             }
+//         }
+//     }
+//     Ok(())
+// }
+//
 
-async fn accept_connections(listener: TcpListener, coordinate_channel: Sender<InternalMessage>, node: Arc<RwLock<Node>>) -> Result<(), ErrorKind> {
-
-    let mut handles = FuturesOrdered::new();
-
-    loop {
-        tokio::select! {
-            Ok((socket, _)) = listener.accept() => {
-                handles.push_back(handle_connection(socket, coordinate_channel.clone(), node.clone()));
-            },
-            Err(err) = listener.accept() => {
-                eprintln!("Error accepting connection: {:?}", err);
-            },
-            Some(_) = handles.next() => {}
-        }
-    }
-}
-
-async fn coordinate_internal_communication(mut channel_rx: Receiver<InternalMessage>, node: Arc<RwLock<Node>>) -> Result<(), ErrorKind>{
-    let mut failed = 0;
-    loop {
-        let message = channel_rx.recv().await.unwrap();
-        match message {
-            InternalMessage::ConnectionFailed { peer } => {
-                failed += 1;
-                if failed == node.read().await.peers_ports.len() {
-                    println!("All connections failed");
-                }
-            },
-            InternalMessage::ConnectionBroken { peer } => {
-                if peer == node.read().await.leader.unwrap() {
-                    println!("Connection broken with leader!\nStarting Election!")
-                }
-            }
-
-            _ => {
-                break
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn handle_handshake(rx: &mut MessageReader<Message, TcpStream>, tx: &mut MessageWriter<Message,TcpStream>, node: Arc<RwLock<Node>>) -> Result<Receiver<InternalMessage>, ErrorKind> {
-    let node_id: u16;
-    let leader: Option<u16>;
-    {
-        let node_lock = node.read().await;
-        node_id = node_lock.id;
-        leader = node_lock.leader
-    }
-
-    tx.send(Message::Handshake {
-        id: node_id,
-        leader,
-    }).await.unwrap();
-
-    let result = rx.next().await;
-    let channel_rx = match result {
-        Some(Ok(Message::Handshake { id, leader: peer_leader })) => {
-            println!("New Connection established with {}", id);
-            let (channel_tx, channel_rx) = tokio::sync::mpsc::channel::<InternalMessage>(10);
-            {
-                let mut node_lock = node.write().await;
-                node_lock.peers_channels.insert(id, channel_tx);
-            }
-            if Some(peer_leader) == Some(leader) {
-                println!("Leader is the same!");
-            } else {
-                println!("Leader not the same! Split the brain!?!?!?");
-            }
-            channel_rx
-        },
-        _ => {
-            println!("Invalid handshake");
-            return Err(ErrorKind::InvalidData.into())
-        }
-    };
-
-    Ok(channel_rx)
-}
-
-async fn process(mut rx: MessageReader<Message, TcpStream>, mut tx: MessageWriter<Message,TcpStream>, coordinate_channel: Sender<InternalMessage>, mut receiver_channel: Receiver<InternalMessage>, nodeId: u16) -> Result<(), ErrorKind>{
-    // TODO implement bully algorithm
-    loop {
-        tokio::select! {
-            Some(message) = rx.next() => {
-                match message {
-                    Ok(Message::Propose { id }) => {
-                        println!("Received Propose from {}", id);
-                        tx.send(Message::Victory { id }).await.unwrap();
-                    },
-                    Ok(Message::Victory { id }) => {
-                        println!("Received Victory from {}", id);
-                    },
-                    Ok(Message::Refused { highest }) => {
-                        println!("Received Refused from {}", highest);
-                    },
-                    _ => {
-                        println!("Invalid message");
-                    }
-                }
-            },
-            Some(message) = receiver_channel.recv() => {
-                match message {
-                    InternalMessage::ConnectionBroken { peer } => {
-                        // tx.send(Message::Refused { highest: peer }).await.unwrap();
-                        println!("Connection broken with {}", peer);
-                    },
-                    _ => {
-                        println!("Invalid message");
-                    }
-                }
-            }
-        }
-    }
-
-    // println!("New connection from {:?}", &sock.peer_addr().unwrap());
-    // let (mut rx, mut tx) = message_split(sock);
-    // tx.send(Message::Handshake {
-    //     leader: nodeId,
-    // }).await.unwrap();
-    //
-    // let result = rx.next().await;
-    // match result {
-    //     Some(Ok(Message::Handshake { id })) => {
-    //         println!("New Connection established with {}", id);
-    //         Ok(())
-    //     },
-    //     _ => {
-    //         println!("Invalid handshake");
-    //         Err(ErrorKind::InvalidData.into())
-    //     }
-    // }
-    Ok(())
-}
+//
+// async fn handle_handshake(rx: &mut MessageReader<Message, TcpStream>, tx: &mut MessageWriter<Message,TcpStream>, node: Arc<RwLock<Node>>) -> Result<(Receiver<InternalMessage>,u16,u16), ErrorKind> {
+//     let node_id: u16;
+//     let peer_id: u16;
+//     let leader: Option<u16>;
+//     {
+//         let node_lock = node.read().await;
+//         node_id = node_lock.id;
+//         leader = node_lock.leader
+//     }
+//
+//     println!("SENDING HANDSHAKE!");
+//     let _ = tx.send(Message::Handshake {
+//         id: node_id,
+//         leader,
+//     }).await;
+//
+//     let result = rx.next().await;
+//     let channel_rx = match result {
+//         Some(Ok(Message::Handshake { id, leader: peer_leader })) => {
+//             println!("New Connection established with {}", id);
+//             let (channel_tx, channel_rx) = tokio::sync::mpsc::channel::<InternalMessage>(10);
+//             {
+//                 let mut node_lock = node.write().await;
+//                 node_lock.peers_channels.insert(id, channel_tx);
+//             }
+//             peer_id = id;
+//             if Some(peer_leader) == Some(leader) {
+//                 println!("Leader is the same!");
+//             } else {
+//                 println!("Leader not the same! Split the brain!?!?!? {:?} != {:?}", peer_leader, leader);
+//             }
+//             channel_rx
+//         },
+//         _ => {
+//             println!("Invalid handshake");
+//             return Err(ErrorKind::InvalidData.into())
+//         }
+//     };
+//     println!("Handshake completed!");
+//     Ok((channel_rx, peer_id, node_id))
+// }
+//
+// async fn process(mut rx: MessageReader<Message, TcpStream>, mut tx: MessageWriter<Message,TcpStream>, coordinate_channel: Sender<InternalMessage>, mut receiver_channel: Receiver<InternalMessage>, node_id: u16, peer_id: u16) -> Result<(), ErrorKind>{
+//     let coordinate_channel_socket = coordinate_channel.clone();
+//     let socket_rx = rx.clone();
+//     let socket_tx = tx.clone();
+//     let mut is_await_election = Arc::new(RwLock::new(false));
+//     let mut socket_is_await_election = is_await_election.clone();
+//     let socket_spawn = tokio::spawn(async move {
+//         loop {
+//             tokio::select! {
+//                 Some(message) = socket_rx.next() => {
+//                     match message {
+//                         Ok(Message::Election { id }) => {
+//                             println!("Received Propose from {}", id);
+//                             if node_id > id {
+//                                 println!("SENDING ALIVE!");
+//                                 if let Err(_) = socket_tx.send(Message::Alive { id: 0 }).await {
+//                                     return broken_connection(peer_id, coordinate_channel_socket.clone()).await;
+//                                 }
+//                             }
+//                         },
+//                         Ok(Message::Victory { id }) => {
+//                             println!("Received Victory from {}", id);
+//                             {
+//                                 let lock = socket_is_await_election.write().await;
+//                                 *lock = false;
+//                             }
+//                             if node_id < id {
+//                                 coordinate_channel_socket.send(InternalMessage::LeaderElected { leader: id }).await.unwrap();
+//                             } else {
+//                                 coordinate_channel_socket.send(InternalMessage::StartElection {}).await.unwrap();
+//                             }
+//                         },
+//                         Ok(Message::Alive { id: 0 }) => {
+//                             println!("Received Alive from {}", peer_id);
+//                             coordinate_channel_socket.send(InternalMessage::PeerAlive { peer: peer_id }).await.unwrap()
+//                         },
+//                         Err(e) => {
+//                             println!("Disconnecting {} with err {}", peer_id, e);
+//                             coordinate_channel_socket.send(InternalMessage::ConnectionBroken { peer: peer_id }).await.unwrap();
+//                             return Ok(())
+//                         },
+//                         _ => {
+//                             println!("Invalid message");
+//                         }
+//                     }
+//                 },
+//                 Some(message) = tokio::time::timeout(time::Duration::from_secs(1), socket_rx.next()).await, if socket_is_await_election.read().await == true => {
+//                     return match message {
+//                         Err(_) => {
+//                             coordinate_channel_socket.send(InternalMessage::PeerElectionTimeout { peer: peer_id }).await.unwrap();
+//                             Err(ErrorKind::ConnectionReset)
+//                         },
+//                     }
+//                 },
+//             }
+//
+//         }
+//     });
+//     let receiver_spawn = tokio::spawn(async move {
+//         loop {
+//             let Some(message) = receiver_channel.recv().await;
+//             match message {
+//                 InternalMessage::StartElection {} => {
+//                     println!("SENDING ELECTION!");
+//                     if let Err(_) = tx.send(Message::Election { id: node_id }).await {
+//                         return broken_connection(peer_id, coordinate_channel.clone()).await;
+//                     }
+//                     {
+//                         let lock = is_await_election.write().await;
+//                         *lock = true;
+//                     }
+//                 }
+//                 InternalMessage::Victory {} => {
+//                     println!("SENDING VICTORY!");
+//                     if let Err(_) = tx.send(Message::Victory { id: node_id }).await {
+//                         return broken_connection(peer_id, coordinate_channel.clone()).await;
+//                     }
+//                 },
+//                 _ => {
+//                     println!("Invalid message");
+//                 }
+//             };
+//         }
+//     });
+//     tokio::join!(socket_spawn, receiver_spawn);
+//     return Ok(())
+// }
+//
+// async fn broken_connection(peer_id: u16, coordinate_channel: Sender<InternalMessage>) -> Result<(), ErrorKind> {
+//     coordinate_channel.send(InternalMessage::ConnectionBroken { peer: peer_id }).await.unwrap();
+//     Err(ErrorKind::ConnectionReset)
+// }
