@@ -97,7 +97,9 @@ impl<M> fmt::Debug for Connection<M> {
     }
 }
 
-impl<M> Stream for Connection<M> {
+impl<M> Stream for Connection<M>
+    where M: Serialize + DeserializeOwned
+{
     type Item = Result<M, std::io::Error>;
 
     fn poll_next(
@@ -108,7 +110,9 @@ impl<M> Stream for Connection<M> {
     }
 }
 
-impl<M> Sink<M> for Connection<M> {
+impl<M> Sink<M> for Connection<M>
+    where M: Serialize + DeserializeOwned
+{
     type Error = std::io::Error;
 
     fn poll_ready(
