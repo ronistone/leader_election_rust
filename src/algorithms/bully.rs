@@ -2,9 +2,11 @@
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc::{Receiver};
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 use crate::communication::communication::{Message, MessageBase, NodeCommunication};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,12 +68,13 @@ pub async fn init_cluster(port: u16, peers: Vec<u16>) {
     ));
 
 
-    let listener = tokio::spawn(listen_message(channel_rx));
+    let listener = tokio::spawn(listen_message(node.clone(), channel_rx));
 
     let _ = tokio::join!(listener);
 }
 
-pub async fn listen_message(mut channel_tx: Receiver<Message<InternalMessage>>) {
+pub async fn listen_message(node: Arc<RwLock<Node>>,
+                            mut channel_tx: Receiver<Message<InternalMessage>>) {
     loop {
         tokio::select! {
             Some(message) = channel_tx.recv() => {
@@ -80,6 +83,7 @@ pub async fn listen_message(mut channel_tx: Receiver<Message<InternalMessage>>) 
                         match internal_message {
                             InternalMessage::Handshake { id, .. } => {
                                 println!("Received Handshake from peer {}", id);
+                                node.write().await.node_communication.rename_peer(message.peer_id, id).await;
                             }
                             InternalMessage::Election { id } => {
                                 println!("Received Election from peer {}", id);
@@ -88,9 +92,13 @@ pub async fn listen_message(mut channel_tx: Receiver<Message<InternalMessage>>) 
                                 println!("Received Victory from peer {}", id);
                             }
                             InternalMessage::Alive { id } => {
-                                println!("Received Alive from peer {}", id);
+                                println!("Received Alive from peer {} on {}", id, message.peer_id);
                             }
                         }
+                    }
+                    MessageBase::ConnectionEstablished { peer } => {
+                        println!("Connection established with peer {}", peer);
+                        handle_handshake(peer, node.clone()).await;
                     }
                     _ => {}
                 }
@@ -111,5 +119,12 @@ pub async fn handle_handshake(peer: u16, node: Arc<RwLock<Node>>) {
     lock.node_communication.send_message(
         peer,
         MessageBase::Custom(InternalMessage::Handshake { id, leader })
+    ).await;
+
+    sleep(Duration::from_millis(500)).await;
+
+    lock.node_communication.send_message(
+        peer,
+        MessageBase::Custom(InternalMessage::Alive { id })
     ).await;
 }
