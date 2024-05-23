@@ -82,9 +82,10 @@ impl<M> NodeCommunication<M>
                 Err(err) => {
                     println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
                     application_channel.send(Message{
-                        peer_id: p,
+                        peer_id: p.clone(),
                         message: MessageBase::ConnectionFailed { peer: p }
                     }).await.unwrap();
+                    peers_channels.remove(&p.clone());
                 }
             };
         }
@@ -118,6 +119,13 @@ impl<M> NodeCommunication<M>
         }
 
     }
+
+    pub async fn get_peers(&self) -> Vec<u16> {
+        let read = self.peers_channels.read().await;
+        let mut peers: Vec<u16> = read.keys().cloned().collect();
+        peers.sort_by(|a, b| b.cmp(a));
+        peers
+    }
 }
 
 async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, listener: TcpListener, application_channel: Sender<Message<M>>) -> Result<(), ErrorKind>
@@ -141,7 +149,6 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
 
                         });
                     }
-                    let p = peer_port.clone();
                     handles.push_back(tokio::spawn(async move { start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()).await }));
                 },
                 Err(err) = listener.accept() => {
@@ -195,7 +202,7 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                 match message {
                     MessageBase::Custom(message) => {
                         {
-                            tx.send(message).await.unwrap();
+                            let  _ = tx.send(message).await;
                         }
                     },
                     _ => {}

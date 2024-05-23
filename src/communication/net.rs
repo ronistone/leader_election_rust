@@ -86,9 +86,9 @@ pub struct Connection<M> {
 }
 
 impl<M> Connection<M> {
-    pub fn new(to: u16, rw: MessageReader<M, TcpStream>, tx: MessageWriter<M, TcpStream>) -> Self {
-        Self { to, rw, tx }
-    }
+    // pub fn new(to: u16, rw: MessageReader<M, TcpStream>, tx: MessageWriter<M, TcpStream>) -> Self {
+    //     Self { to, rw, tx }
+    // }
 }
 
 impl<M> fmt::Debug for Connection<M> {
