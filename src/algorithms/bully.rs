@@ -85,43 +85,61 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                         match internal_message {
                             InternalMessage::Handshake { id, .. } => {
                                 println!("Received Handshake from peer {}", id);
-                                node.write().await.node_communication.rename_peer(message.peer_id, id).await;
+                                let mut write = node.write().await;
+                                write.node_communication.rename_peer(message.peer_id, id).await;
+                                drop(write);
                             }
                             InternalMessage::Election { id } => {
                                 println!("Received Election from peer {}", id);
-                                if id < node.read().await.id {
+                                let read = node.read().await;
+                                if id < read.id {
+                                    drop(read);
                                     respond_invalid_election(node.clone(), id).await;
+                                } else {
+                                    drop(read);
                                 }
+
                             }
                             InternalMessage::Victory { id } => {
                                 println!("Received Victory from peer {}", id);
-                                if id > node.read().await.id {
-                                    let mut write = node.write().await;
-                                    write.leader = Some(id);
-                                    write.state = State::Follower;
+                                {
+                                    let read = node.read().await;
+                                    if id > read.id {
+                                        drop(read);
+                                        let mut write = node.write().await;
+                                        write.leader = Some(id);
+                                        write.state = State::Follower;
+                                        drop(write);
 
-                                    println!("The peer {} is the new leader", id);
-                                } else {
-                                    respond_invalid_election(node.clone(), id).await;
+                                        println!("The peer {} is the new leader", id);
+                                    } else {
+                                        drop(read);
+                                        respond_invalid_election(node.clone(), id).await;
+                                    }
                                 }
                             }
                             InternalMessage::Alive { id } => {
                                 println!("Received Alive from peer {} on {}", id, message.peer_id);
-                                let mut lock = node.write().await;
-                                if id > lock.id && lock.state == State::Candidate {
-                                    lock.state = State::Follower;
-                                } else {
-                                    println!("Ignoring Alive from peer {}", id);
+                                {
+                                    let mut lock = node.write().await;
+                                    if id > lock.id && lock.state == State::Candidate {
+                                        lock.state = State::Follower;
+                                    } else {
+                                        println!("Ignoring Alive from peer {}", id);
+                                    }
+                                    drop(lock);
                                 }
                             }
                         }
                     }
                     MessageBase::ConnectionEstablished { peer } => {
-                        println!("Connection established with peer {}", peer);
-                        handle_handshake(peer, node.clone()).await;
+                        tokio::spawn(handle_handshake(peer, node.clone()));
                     }
                     _ => {}
                 }
+            }
+            else => {
+                println!("Channel closed in listen message!");
             }
         }
     }
@@ -135,49 +153,61 @@ pub async fn handle_handshake(peer: u16, node: Arc<RwLock<Node>>) {
         let lock = node.read().await;
         id = lock.id;
         leader = lock.leader;
+        drop(lock);
     }
-    println!("Handshake read lock resolved");
     {
         let mut lock = node.write().await;
         let _ = lock.node_communication.send_message(
             peer,
             MessageBase::Custom(InternalMessage::Handshake { id, leader })
         ).await;
-        println!("Handshake sent to peer {}", peer);
+        drop(lock);
     }
 
-    sleep(Duration::from_millis(500)).await;
-
+    sleep(Duration::from_millis(1000)).await;
 }
 
 pub async fn respond_invalid_election(node: Arc<RwLock<Node>>, peer_id: u16) {
     {
+        println!("Im see invalid election start a new one! peer={}", peer_id);
         let mut lock = node.write().await;
         let node_id = lock.id.clone();
         let _ = lock.node_communication.send_message(
             peer_id,
             MessageBase::Custom(InternalMessage::Alive { id: node_id })
         ).await;
+        println!("I Send an alive message to peer {} with my id {}", peer_id, node_id);
+        drop(lock);
     }
     let  _ = start_election(node.clone());
 }
 pub async fn start_election(node: Arc<RwLock<Node>>) {
     let peers: Vec<u16>;
     let node_id: u16;
-    {
-        let mut lock = node.write().await;
-        node_id = lock.id;
-        peers = lock.node_communication.get_peers().await;
-        lock.state = State::Candidate;
-    }
+    let mut lock = node.write().await;
+    node_id = lock.id;
+    peers = lock.node_communication.get_peers().await;
+    lock.state = State::Candidate;
+    drop(lock);
 
-    for peer_id in peers.iter() {
-        println!("Sending Election to peer {}", peer_id);
-        if peer_id > &node_id {
-            let _ = node.write().await.node_communication.send_message(
-                *peer_id,
-                MessageBase::Custom(InternalMessage::Election { id: node_id.clone() })
-            ).await;
+    {
+        for peer_id in peers.iter() {
+            println!("Sending Election to peer {}", peer_id);
+            if *peer_id > node_id {
+                let n = node.clone();
+                let p = peer_id.clone();
+                tokio::spawn(async move {
+                        let mut write = n.write().await;
+                    let _ = write.node_communication.send_message(
+                        p,
+                        MessageBase::Custom(InternalMessage::Election { id: node_id.clone() })
+                    ).await;
+                    drop(write);
+                    }
+                );
+            } else {
+                println!("Message not sended! because the peer has a higher id");
+            }
         }
     }
 
@@ -185,17 +215,19 @@ pub async fn start_election(node: Arc<RwLock<Node>>) {
 }
 
 pub async fn wait_to_announce_victory(node: Arc<RwLock<Node>>) {
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(2000)).await;
 
     let read = node.read().await;
 
     if read.state == State::Candidate {
+        drop(read);
         {
             let mut write = node.write().await;
             write.state = State::Primary;
+            drop(write);
         }
         println!("Announcing victory");
-        let _ = announce_victory(node.clone());
+        let _ = announce_victory(node.clone()).await;
     }
 
 }
@@ -205,9 +237,11 @@ async fn announce_victory(node: Arc<RwLock<Node>>) {
     let peers = write.node_communication.get_peers().await;
     let node_id = write.id.clone();
     for peer_id in peers.iter() {
-        write.node_communication.send_message(
+        println!("Sending Victory to peer {}", peer_id);
+        let _ = write.node_communication.send_message(
             *peer_id,
             MessageBase::Custom(InternalMessage::Victory { id: node_id })
         ).await;
     }
+    drop(write);
 }

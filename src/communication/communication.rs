@@ -66,10 +66,10 @@ impl<M> NodeCommunication<M>
             let p = peer.clone();
 
             let application_channel = receiver_channel.clone();
-            let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+            let (sender_channel_tx, mut sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
             peers_channels.insert(p, Peer {
                 id: Arc::new(RwLock::new(p)),
-                channel: sender_channel_tx
+                channel: sender_channel_tx.clone()
             });
             let app_channel = application_channel.clone();
 
@@ -77,32 +77,35 @@ impl<M> NodeCommunication<M>
             println!("Connecting to {}", peer_address);
             match TcpStream::connect(peer_address.clone()).await {
                 Ok(socket) => {
-                    handlers.push(tokio::spawn(async move { start_handler(socket, app_channel, sender_channel_rx, Arc::new(RwLock::new(p))).await }));
+                    handlers.push(tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, Arc::new(RwLock::new(p)))));
                 }
                 Err(err) => {
                     println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
-                    application_channel.send(Message{
+                    let _ = application_channel.send(Message {
                         peer_id: p.clone(),
                         message: MessageBase::ConnectionFailed { peer: p }
-                    }).await.unwrap();
+                    }).await;
                     peers_channels.remove(&p.clone());
                 }
             };
         }
+        drop(peers_channels);
     }
 
     pub async fn send_message(&mut self, peer: u16, message: MessageBase<M>) {
         let read = self.peers_channels.read().await;
         if read.contains_key(&peer) {
             if let Some(peer_lock) = read.get(&peer) {
-                peer_lock.channel.send(message).await.unwrap();
+                let _ = peer_lock.channel.send(message).await;
             } else {
                 println!("Peer {} not found!", peer);
             }
         }
+        drop(read);
     }
 
     pub async fn rename_peer(&mut self, old: u16, new: u16) {
+        println!("Renaming peer {} to {}", old, new);
         let mut write = self.peers_channels.write().await;
         if let Some(peer) = write.get_mut(&old) {
             {
@@ -123,6 +126,7 @@ impl<M> NodeCommunication<M>
     pub async fn get_peers(&self) -> Vec<u16> {
         let read = self.peers_channels.read().await;
         let mut peers: Vec<u16> = read.keys().cloned().collect();
+        drop(read);
         peers.sort_by(|a, b| b.cmp(a));
         peers
     }
@@ -143,11 +147,13 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
                     let peer_id = Arc::new(RwLock::new(peer_port));
 
                     {
-                        peers_channels.write().await.insert(peer_port.clone(), Peer {
+                        let mut write = peers_channels.write().await;
+                        write.insert(peer_port.clone(), Peer {
                             id: peer_id.clone(),
                             channel: sender_channel_tx.clone()
 
                         });
+                        drop(write);
                     }
                     handles.push_back(tokio::spawn(async move { start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()).await }));
                 },
@@ -155,7 +161,7 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
                     eprintln!("Error accepting connection: {:?}", err);
                 },
                 Some(_) = handles.next() => {}
-            }
+        }
     }
 }
 
@@ -164,41 +170,46 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
 {
     let (mut rx, mut tx) = message_split(socket);
     {
-        let peer_locked = peer.read().await.clone();
-        channel.send(Message{
-            peer_id: peer_locked,
-            message: MessageBase::ConnectionEstablished { peer: peer_locked }
-        }).await.unwrap();
+        let peer_locked = peer.read().await;
+        let _ = channel.send(Message {
+            peer_id: *peer_locked,
+            message: MessageBase::ConnectionEstablished { peer: *peer_locked }
+        }).await;
+        drop(peer_locked);
     }
 
     loop {
         tokio::select! {
             Some(message) = rx.next() => {
+                println!("Received message from socket!");
                 match message {
                     Ok(message) => {
                         {
-                            let peer_locked = peer.read().await.clone();
-                            channel.send(Message{
-                                peer_id: peer_locked,
+                            let peer_locked = peer.read().await;
+                            let  _ = channel.send(Message{
+                                peer_id: *peer_locked,
                                 message: MessageBase::Custom(message)
-                            }).await.unwrap();
+                            }).await;
+                            drop(peer_locked);
                         }
 
                     },
                     Err(err) => {
                         eprintln!("Error reading message from socket: {:?}", err);
                         {
-                            let peer_locked = peer.read().await.clone();
-                            channel.send(Message{
-                                peer_id: peer_locked,
-                                message: MessageBase::ConnectionBroken { peer: peer_locked }
-                            }).await.unwrap();
+                            let peer_locked = peer.read().await;
+                            let  _ = channel.send(Message{
+                                peer_id: *peer_locked,
+                                message: MessageBase::ConnectionBroken { peer: *peer_locked }
+                            }).await;
+                            drop(peer_locked);
                         }
                         break;
                     }
                 }
             }
             Some(message) = sender_channel_rx.recv() => {
+                println!("Received message from channel!");
                 match message {
                     MessageBase::Custom(message) => {
                         {
@@ -207,7 +218,13 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                     },
                     _ => {}
                 }
+                println!("Message Sended to socket!")
             }
+            else => {
+                println!("Channels closed!");
+                break;
+            }
+            // _ = tokio::time::interval.tick() => {}
         }
     }
 }
