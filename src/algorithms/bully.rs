@@ -70,6 +70,8 @@ pub async fn init_cluster(port: u16, peers: Vec<u16>) {
 
     let listener = tokio::spawn(listen_message(node.clone(), channel_rx));
 
+    sleep(Duration::from_millis(2000)).await; // wait for all peers to be connected
+
     let election = tokio::spawn(start_election(node.clone()));
 
     let _ = tokio::join!(listener, election);
@@ -103,19 +105,12 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                             InternalMessage::Victory { id } => {
                                 println!("Received Victory from peer {}", id);
                                 {
-                                    let read = node.read().await;
-                                    if id > read.id {
-                                        drop(read);
-                                        let mut write = node.write().await;
-                                        write.leader = Some(id);
-                                        write.state = State::Follower;
-                                        drop(write);
+                                    let mut write = node.write().await;
+                                    write.leader = Some(id);
+                                    write.state = State::Follower;
+                                    drop(write);
 
-                                        println!("The peer {} is the new leader", id);
-                                    } else {
-                                        drop(read);
-                                        respond_invalid_election(node.clone(), id).await;
-                                    }
+                                    println!("The peer {} is the new leader", id);
                                 }
                             }
                             InternalMessage::Alive { id } => {
@@ -179,7 +174,7 @@ pub async fn respond_invalid_election(node: Arc<RwLock<Node>>, peer_id: u16) {
         println!("I Send an alive message to peer {} with my id {}", peer_id, node_id);
         drop(lock);
     }
-    let  _ = start_election(node.clone());
+    let  _ = start_election(node.clone()).await;
 }
 pub async fn start_election(node: Arc<RwLock<Node>>) {
     let peers: Vec<u16>;
@@ -190,12 +185,14 @@ pub async fn start_election(node: Arc<RwLock<Node>>) {
     lock.state = State::Candidate;
     drop(lock);
 
+    let mut has_send_message = false;
     {
         for peer_id in peers.iter() {
             println!("Sending Election to peer {}", peer_id);
             if *peer_id > node_id {
                 let n = node.clone();
                 let p = peer_id.clone();
+                has_send_message = true;
                 tokio::spawn(async move {
                         let mut write = n.write().await;
                     let _ = write.node_communication.send_message(
@@ -203,19 +200,19 @@ pub async fn start_election(node: Arc<RwLock<Node>>) {
                         MessageBase::Custom(InternalMessage::Election { id: node_id.clone() })
                     ).await;
                     drop(write);
-                    }
-                );
+                });
             } else {
-                println!("Message not sended! because the peer has a higher id");
+                println!("Message not sended! because the peer has a lowest id");
             }
         }
     }
-
+    if has_send_message {
+        sleep(Duration::from_millis(2000)).await;
+    }
     tokio::spawn(wait_to_announce_victory(node.clone()));
 }
 
 pub async fn wait_to_announce_victory(node: Arc<RwLock<Node>>) {
-    sleep(Duration::from_millis(2000)).await;
 
     let read = node.read().await;
 

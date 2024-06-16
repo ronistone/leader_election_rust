@@ -33,20 +33,4 @@ async fn main() {
 
     algorithms::bully::init_cluster(args.port, args.peers).await;
 
-    // println!("Started");
-    // tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    // tokio::spawn(heavy_computation("task1"));
-    // tokio::spawn(heavy_computation("task2"));
-    // println!("About to sleep again!");
-    // tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-
-}
-
-async fn heavy_computation(task: &str) {
-    for i in 0..1000000000 {
-        if i % 100000000 == 0 {
-            println!("{}: {}", task, i)
-        }
-    }
 }

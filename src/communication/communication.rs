@@ -66,7 +66,7 @@ impl<M> NodeCommunication<M>
             let p = peer.clone();
 
             let application_channel = receiver_channel.clone();
-            let (sender_channel_tx, mut sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+            let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
             peers_channels.insert(p, Peer {
                 id: Arc::new(RwLock::new(p)),
                 channel: sender_channel_tx.clone()
@@ -181,7 +181,6 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
     loop {
         tokio::select! {
             Some(message) = rx.next() => {
-                println!("Received message from socket!");
                 match message {
                     Ok(message) => {
                         {
@@ -195,9 +194,9 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
 
                     },
                     Err(err) => {
-                        eprintln!("Error reading message from socket: {:?}", err);
                         {
                             let peer_locked = peer.read().await;
+                            eprintln!("Error reading message from socket peer={}: {:?}", *peer_locked, err);
                             let  _ = channel.send(Message{
                                 peer_id: *peer_locked,
                                 message: MessageBase::ConnectionBroken { peer: *peer_locked }
@@ -209,7 +208,6 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                 }
             }
             Some(message) = sender_channel_rx.recv() => {
-                println!("Received message from channel!");
                 match message {
                     MessageBase::Custom(message) => {
                         {
@@ -218,13 +216,11 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                     },
                     _ => {}
                 }
-                println!("Message Sended to socket!")
             }
             else => {
                 println!("Channels closed!");
                 break;
             }
-            // _ = tokio::time::interval.tick() => {}
         }
     }
 }
