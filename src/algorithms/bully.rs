@@ -26,17 +26,6 @@ pub enum InternalMessage {
     },
 }
 
-// #[derive(Debug, Serialize, Deserialize)]
-// pub enum InternalMessage {
-//     AllConnectionsFailed {},
-//     ConnectionFailed { peer: u16 },
-//     ConnectionBroken { peer: u16 },
-//     StartElection {},
-//     Victory {},
-//     PeerElectionTimeout { peer: u16 },
-//     LeaderElected { leader: u16 },
-//     PeerAlive { peer: u16 },
-// }
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum State {
     Primary,
@@ -47,7 +36,6 @@ pub enum State {
 pub struct Node {
     id: u16,
     state: State,
-    // peers_ports: Vec<u16>,
     leader: Option<u16>,
     node_communication: NodeCommunication<InternalMessage>
 }
@@ -62,7 +50,6 @@ pub async fn init_cluster(port: u16, peers: Vec<u16>) {
             id: port,
             state: State::Candidate,
             leader: None,
-            // peers_ports: peers,
             node_communication: communication,
         }
     ));
@@ -130,7 +117,9 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                     MessageBase::ConnectionEstablished { peer } => {
                         tokio::spawn(handle_handshake(peer, node.clone()));
                     }
-                    _ => {}
+                    _ => {
+                        eprintln!("Unexpected message: {:?}", message.message)
+                    }
                 }
             }
             else => {
