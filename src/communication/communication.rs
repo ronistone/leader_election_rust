@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
 use futures::SinkExt;
-use futures::stream::{FuturesOrdered, StreamExt};
+use futures::stream::{StreamExt};
 use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock};
 use crate::communication::net::{message_split};
@@ -132,12 +131,9 @@ impl<M> NodeCommunication<M>
     }
 }
 
-async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, listener: TcpListener, application_channel: Sender<Message<M>>) -> Result<(), ErrorKind>
+async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, listener: TcpListener, application_channel: Sender<Message<M>>)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
-
-    let mut handles = FuturesOrdered::new();
-
     loop {
         tokio::select! {
                 Ok((socket, _)) = listener.accept() => {
@@ -151,16 +147,18 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
                         write.insert(peer_port.clone(), Peer {
                             id: peer_id.clone(),
                             channel: sender_channel_tx.clone()
-
                         });
                         drop(write);
                     }
-                    handles.push_back(tokio::spawn(async move { start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()).await }));
+                    tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
                 },
                 Err(err) = listener.accept() => {
                     eprintln!("Error accepting connection: {:?}", err);
                 },
-                Some(_) = handles.next() => {}
+                else => {
+                    println!("Listener closed!");
+                    break;
+                }
         }
     }
 }
@@ -168,6 +166,7 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
 async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut sender_channel_rx: Receiver<MessageBase<M>>, peer: Arc<RwLock<u16>>)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
+    let _ = socket.set_nodelay(true);
     let (mut rx, mut tx) = message_split(socket);
     {
         let peer_locked = peer.read().await;
@@ -180,9 +179,9 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
 
     loop {
         tokio::select! {
-            Some(message) = rx.next() => {
+            message = rx.next() => {
                 match message {
-                    Ok(message) => {
+                    Some(Ok(message)) => {
                         {
                             let peer_locked = peer.read().await;
                             let  _ = channel.send(Message{
@@ -191,12 +190,11 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                             }).await;
                             drop(peer_locked);
                         }
-
-                    },
-                    Err(err) => {
+                    }
+                    _ => {
                         {
                             let peer_locked = peer.read().await;
-                            eprintln!("Error reading message from socket peer={}: {:?}", *peer_locked, err);
+                            eprintln!("Socket with {} closed we dont can handle the message sent!", *peer_locked);
                             let  _ = channel.send(Message{
                                 peer_id: *peer_locked,
                                 message: MessageBase::ConnectionBroken { peer: *peer_locked }
