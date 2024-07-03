@@ -135,31 +135,21 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     loop {
-        tokio::select! {
-                Ok((socket, _)) = listener.accept() => {
-                    let app_channel = application_channel.clone();
-                    let peer_port = socket.peer_addr().unwrap().port();
-                    let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
-                    let peer_id = Arc::new(RwLock::new(peer_port));
+        let (socket, _) = listener.accept().await.unwrap();
+        let app_channel = application_channel.clone();
+        let peer_port = socket.peer_addr().unwrap().port();
+        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+        let peer_id = Arc::new(RwLock::new(peer_port));
 
-                    {
-                        let mut write = peers_channels.write().await;
-                        write.insert(peer_port.clone(), Peer {
-                            id: peer_id.clone(),
-                            channel: sender_channel_tx.clone()
-                        });
-                        drop(write);
-                    }
-                    tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
-                },
-                Err(err) = listener.accept() => {
-                    eprintln!("Error accepting connection: {:?}", err);
-                },
-                else => {
-                    println!("Listener closed!");
-                    break;
-                }
+        {
+            let mut write = peers_channels.write().await;
+            write.insert(peer_port.clone(), Peer {
+                id: peer_id.clone(),
+                channel: sender_channel_tx.clone()
+            });
+            drop(write);
         }
+        tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
     }
 }
 

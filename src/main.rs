@@ -15,11 +15,18 @@ struct Args {
     #[clap(long, num_args=1..)]
     peers: Vec<u16>,
 
+    #[clap(long, short, action)]
+    trace: bool,
+
 }
 
 #[tokio::main(flavor="multi_thread", worker_threads=2)]
 async fn main() {
     let args: Args = Args::parse();
+
+    if args.trace {
+        console_subscriber::init();
+    }
 
     if args.port <= 10000 {
         eprintln!("port must be greater than 10000");
