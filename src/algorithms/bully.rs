@@ -125,6 +125,10 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                     MessageBase::ConnectionEstablished { peer } => {
                         tokio::spawn(handle_handshake(peer, node.clone()));
                     }
+                    MessageBase::ConnectionBroken { peer } => {
+                        println!("Connection with peer {} broken starting reconnect", peer);
+                        tokio::spawn(handle_reconnect(peer, node.clone()));
+                    }
                     _ => {
                         eprintln!("Unexpected message: {:?}", message.message)
                     }
@@ -157,6 +161,20 @@ pub async fn handle_handshake(peer: u16, node: Arc<RwLock<Node>>) {
     }
 
     sleep(Duration::from_millis(1000)).await;
+}
+
+pub async fn handle_reconnect(peer:u16, node: Arc<RwLock<Node>>) {
+    loop {
+        let mut lock = node.write().await;
+        println!("Trying reconnect with peer {}", peer);
+        let is_connected = lock.node_communication.reconnect(peer).await;
+        drop(lock);
+        if is_connected {
+            println!("Reconnected with peer {}", peer);
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
 }
 
 pub async fn respond_invalid_election(node: Arc<RwLock<Node>>, peer_id: u16) {
