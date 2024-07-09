@@ -2,11 +2,10 @@
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc::{Receiver};
 use tokio::sync::RwLock;
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep, Duration};
 use crate::communication::communication::{Message, MessageBase, NodeCommunication};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,7 +25,7 @@ pub enum InternalMessage {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum State {
     Primary,
     Follower,
@@ -37,7 +36,9 @@ pub struct Node {
     id: u16,
     state: State,
     leader: Option<u16>,
-    node_communication: NodeCommunication<InternalMessage>
+    node_communication: NodeCommunication<InternalMessage>,
+    last_alive: Option<Instant>,
+    running_heartbeat: bool,
 }
 
 
@@ -51,6 +52,8 @@ pub async fn init_cluster(port: u16, peers: Vec<u16>) {
             state: State::Candidate,
             leader: None,
             node_communication: communication,
+            last_alive: None,
+            running_heartbeat: false,
         }
     ));
 
@@ -93,21 +96,26 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                                 println!("Received Victory from peer {}", id);
                                 {
                                     let mut write = node.write().await;
+                                    let old_leader = write.leader.clone();
                                     write.leader = Some(id);
                                     write.state = State::Follower;
                                     drop(write);
+
+                                    if old_leader.is_none() || old_leader.unwrap() != id {
+                                        tokio::spawn(check_leader(node.clone()));
+                                    }
 
                                     println!("The peer {} is the new leader", id);
                                 }
                             }
                             InternalMessage::Alive { id } => {
-                                println!("Received Alive from peer {} on {}", id, message.peer_id);
                                 {
                                     let mut lock = node.write().await;
                                     if id > lock.id && lock.state == State::Candidate {
                                         lock.state = State::Follower;
-                                    } else {
-                                        println!("Ignoring Alive from peer {}", id);
+                                    }
+                                    if !lock.leader.is_none() && lock.leader.unwrap() == id {
+                                        lock.last_alive = Some(Instant::now());
                                     }
                                     drop(lock);
                                 }
@@ -230,4 +238,55 @@ async fn announce_victory(node: Arc<RwLock<Node>>) {
         ).await;
     }
     drop(write);
+    tokio::spawn(heartbeat(node.clone()));
+}
+
+async fn check_leader(node: Arc<RwLock<Node>>) {
+    loop {
+        let read = node.read().await;
+        let state = read.state.clone();
+        let last_alive = read.last_alive.clone();
+        drop(read);
+        if state == State::Primary {
+            return;
+        }
+        if state == State::Follower && !last_alive.is_none() && last_alive.unwrap().elapsed() > Duration::from_secs(1) {
+            let _ = start_election(node.clone()).await;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn heartbeat(node: Arc<RwLock<Node>>) {
+    let read = node.read().await;
+    if read.running_heartbeat {
+        drop(read);
+        return;
+    }
+    drop(read);
+    loop {
+        let read = node.read().await;
+        let state = read.state.clone();
+        drop(read);
+        if state == State::Primary {
+            let mut write = node.write().await;
+            write.running_heartbeat = true;
+            let peers = write.node_communication.get_peers().await;
+            let id = write.id.clone();
+            for peer_id in peers.iter() {
+                if (*peer_id) != id {
+                    let _ = write.node_communication.send_message(
+                        *peer_id,
+                        MessageBase::Custom(InternalMessage::Alive { id })
+                    ).await;
+                }
+            }
+            drop(write);
+        } else {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    let mut write = node.write().await;
+    write.running_heartbeat = false;
 }
