@@ -130,6 +130,7 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
             Ok(socket) => {
                 reconnection_wait_time = 500;
                 start_handler(socket, app_channel, sender_channel_rx, peer_id_lock.clone()).await;
+                continue;
             }
             Err(err) => {
                 println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
