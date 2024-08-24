@@ -111,13 +111,10 @@ impl<M> NodeCommunication<M>
     }
     pub async fn reconnect(&mut self, peer: u16) -> bool { // TODO fix when the reconnect occurs before the rename, and when the peer connect first the reconnect runs
         let receiver_channel = self.receiver_channel.clone();
-        {
-            self.send_message(peer, MessageBase::ForceDisconnect { peer }).await;
-        }
         let mut peers_channels = self.peers_channels.write().await;
         let is_connected = connect_to_peer(receiver_channel.clone().unwrap(), &mut peers_channels, &peer).await;
         drop(peers_channels);
-        return is_connected;
+        is_connected
     }
 }
 
@@ -139,7 +136,7 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
             });
             drop(write);
         }
-        tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
+        tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone(), false));
     }
 }
 
@@ -159,9 +156,9 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
 
     let peer_address = format!("127.0.0.1:{}", p);
     println!("Connecting to {}", peer_address);
-    return match TcpStream::connect(peer_address.clone()).await {
+    match TcpStream::connect(peer_address.clone()).await {
         Ok(socket) => {
-            tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id_lock.clone()));
+            tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id_lock.clone(), true));
             true
         }
         Err(err) => {
@@ -169,11 +166,17 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
             peers_channels.remove(&p.clone());
             false
         }
-    };
+    }
 }
 
 
-async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut sender_channel_rx: Receiver<MessageBase<M>>, peer: Arc<RwLock<u16>>)
+async fn start_handler<M>(
+    socket: TcpStream,
+    channel: Sender<Message<M>>,
+    mut sender_channel_rx: Receiver<MessageBase<M>>,
+    peer: Arc<RwLock<u16>>,
+    can_reconnect: bool
+)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     let _ = socket.set_nodelay(true);
@@ -202,7 +205,7 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                         }
                     }
                     _ => {
-                        {
+                        if can_reconnect {
                             let peer_locked = peer.read().await;
                             println!("Socket with {} closed we dont can handle the message sent!", *peer_locked);
                             let  _ = channel.send(Message{
