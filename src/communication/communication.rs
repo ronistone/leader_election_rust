@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use futures::SinkExt;
 use futures::stream::{StreamExt};
 use serde::de::DeserializeOwned;
-use tokio::sync::{RwLock};
+use tokio::sync::RwLock;
+use tokio::time::sleep;
 use crate::communication::net::{message_split};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,6 +42,7 @@ pub struct NodeCommunication<M>
 
 {
     peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>,
+    receiver_channel: Option<Sender<Message<M>>>,
 }
 
 impl<M> NodeCommunication<M>
@@ -49,6 +52,7 @@ impl<M> NodeCommunication<M>
     pub fn new() -> Self {
         Self {
             peers_channels: Arc::new(RwLock::new(HashMap::new())),
+            receiver_channel: None,
         }
     }
 
@@ -56,40 +60,14 @@ impl<M> NodeCommunication<M>
         let address = format!("0.0.0.0:{}", port);
         println!("Listening on {}", address);
         let listener = TcpListener::bind(address).await.unwrap();
-        let p_channels = self.peers_channels.clone();
-        tokio::spawn(accept_connections(p_channels, listener, receiver_channel.clone()));
+        self.receiver_channel = Option::from(receiver_channel.clone());
+        tokio::spawn(accept_connections(listener, receiver_channel.clone()));
 
-        let mut handlers = Vec::new();
-        let mut peers_channels = self.peers_channels.write().await;
         for peer in peers.iter() {
-            let p = peer.clone();
-
-            let application_channel = receiver_channel.clone();
-            let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
-            peers_channels.insert(p, Peer {
-                id: Arc::new(RwLock::new(p)),
-                channel: sender_channel_tx.clone()
-            });
-            let app_channel = application_channel.clone();
-
-            let peer_address = format!("127.0.0.1:{}", p);
-            println!("Connecting to {}", peer_address);
-            match TcpStream::connect(peer_address.clone()).await {
-                Ok(socket) => {
-                    handlers.push(tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, Arc::new(RwLock::new(p)))));
-                }
-                Err(err) => {
-                    println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
-                    let _ = application_channel.send(Message {
-                        peer_id: p.clone(),
-                        message: MessageBase::ConnectionFailed { peer: p }
-                    }).await;
-                    peers_channels.remove(&p.clone());
-                }
-            };
+            tokio::spawn(connect_to_peer(receiver_channel.clone(), self.peers_channels.clone(), peer.clone()));
         }
-        drop(peers_channels);
     }
+
 
     pub async fn send_message(&mut self, peer: u16, message: MessageBase<M>) {
         let read = self.peers_channels.read().await;
@@ -103,25 +81,6 @@ impl<M> NodeCommunication<M>
         drop(read);
     }
 
-    pub async fn rename_peer(&mut self, old: u16, new: u16) {
-        println!("Renaming peer {} to {}", old, new);
-        let mut write = self.peers_channels.write().await;
-        if let Some(peer) = write.get_mut(&old) {
-            {
-                let mut id = peer.id.write().await;
-                *id = new;
-            }
-
-            if let Some(peer_channel) = write.remove(&old) {
-                write.insert(new, peer_channel);
-                println!("Peer {} renamed to {}", old, new);
-            }
-        } else {
-            println!("Peer {} not found!", old);
-        }
-
-    }
-
     pub async fn get_peers(&self) -> Vec<u16> {
         let read = self.peers_channels.read().await;
         let mut peers: Vec<u16> = read.keys().cloned().collect();
@@ -131,29 +90,69 @@ impl<M> NodeCommunication<M>
     }
 }
 
-async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, listener: TcpListener, application_channel: Sender<Message<M>>)
+async fn accept_connections<M>(listener: TcpListener, application_channel: Sender<Message<M>>)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     loop {
         let (socket, _) = listener.accept().await.unwrap();
         let app_channel = application_channel.clone();
         let peer_port = socket.peer_addr().unwrap().port();
-        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+        let (_, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(1); // Only to use the same handler function, this will not be used
         let peer_id = Arc::new(RwLock::new(peer_port));
 
-        {
-            let mut write = peers_channels.write().await;
-            write.insert(peer_port.clone(), Peer {
-                id: peer_id.clone(),
-                channel: sender_channel_tx.clone()
-            });
-            drop(write);
-        }
         tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
     }
 }
 
-async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut sender_channel_rx: Receiver<MessageBase<M>>, peer: Arc<RwLock<u16>>)
+async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, peer: u16) -> bool
+    where M: Serialize + DeserializeOwned + Send + 'static
+{
+    let mut reconnection_wait_time = 100;
+    const MAX_RECONNECTION_WAIT_TIME: u64 = 4000;
+    loop {
+        let p = peer.clone();
+
+        let application_channel = receiver_channel.clone();
+        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(10);
+        let peer_id_lock = Arc::new(RwLock::new(p));
+
+        let mut write = peers_channels.write().await;
+        write.insert(p, Peer {
+            id: peer_id_lock.clone(),
+            channel: sender_channel_tx.clone()
+        });
+        drop(write);
+        let app_channel = application_channel.clone();
+
+        let peer_address = format!("127.0.0.1:{}", p);
+        println!("Connecting to {}", peer_address);
+        match TcpStream::connect(peer_address.clone()).await {
+            Ok(socket) => {
+                reconnection_wait_time = 500;
+                start_handler(socket, app_channel, sender_channel_rx, peer_id_lock.clone()).await;
+                continue;
+            }
+            Err(err) => {
+                println!("error connecting to server at  --- {peer_address} --- : ERROR({err})");
+                let mut write = peers_channels.write().await;
+                write.remove(&p.clone());
+                drop(write);
+            }
+        }
+        sleep(tokio::time::Duration::from_millis(reconnection_wait_time)).await;
+        if reconnection_wait_time < MAX_RECONNECTION_WAIT_TIME {
+            reconnection_wait_time = min(reconnection_wait_time * 2, MAX_RECONNECTION_WAIT_TIME);
+        }
+    }
+}
+
+
+async fn start_handler<M>(
+    socket: TcpStream,
+    channel: Sender<Message<M>>,
+    mut sender_channel_rx: Receiver<MessageBase<M>>,
+    peer: Arc<RwLock<u16>>
+)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     let _ = socket.set_nodelay(true);
@@ -182,15 +181,6 @@ async fn start_handler<M>(socket: TcpStream, channel: Sender<Message<M>>, mut se
                         }
                     }
                     _ => {
-                        {
-                            let peer_locked = peer.read().await;
-                            eprintln!("Socket with {} closed we dont can handle the message sent!", *peer_locked);
-                            let  _ = channel.send(Message{
-                                peer_id: *peer_locked,
-                                message: MessageBase::ConnectionBroken { peer: *peer_locked }
-                            }).await;
-                            drop(peer_locked);
-                        }
                         break;
                     }
                 }
