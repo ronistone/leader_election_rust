@@ -86,7 +86,7 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                                 let read = node.read().await;
                                 if id < read.id {
                                     drop(read);
-                                    respond_invalid_election(node.clone(), id).await;
+                                    tokio::spawn(respond_invalid_election(node.clone(), id));
                                 } else {
                                     drop(read);
                                 }
@@ -110,6 +110,7 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                             }
                             InternalMessage::Alive { id } => {
                                 {
+                                    // println!("Received Alive from peer {}", id); // DEBUG LEADER MESSAGE
                                     let mut lock = node.write().await;
                                     if id > lock.id && lock.state == State::Candidate {
                                         lock.state = State::Follower;
@@ -191,7 +192,7 @@ pub async fn start_election(node: Arc<RwLock<Node>>) {
                 let p = peer_id.clone();
                 has_send_message = true;
                 tokio::spawn(async move {
-                        let mut write = n.write().await;
+                    let mut write = n.write().await;
                     let _ = write.node_communication.send_message(
                         p,
                         MessageBase::Custom(InternalMessage::Election { id: node_id.clone() })
@@ -204,9 +205,9 @@ pub async fn start_election(node: Arc<RwLock<Node>>) {
         }
     }
     if has_send_message {
-        sleep(Duration::from_millis(2000)).await;
+        sleep(Duration::from_millis(3000)).await;
     }
-    tokio::spawn(wait_to_announce_victory(node.clone()));
+    wait_to_announce_victory(node.clone()).await;
 }
 
 pub async fn wait_to_announce_victory(node: Arc<RwLock<Node>>) {
