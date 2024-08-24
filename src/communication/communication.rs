@@ -83,25 +83,6 @@ impl<M> NodeCommunication<M>
         drop(read);
     }
 
-    pub async fn rename_peer(&mut self, old: u16, new: u16) {
-        println!("Renaming peer {} to {}", old, new);
-        let mut write = self.peers_channels.write().await;
-        if let Some(peer) = write.get_mut(&old) {
-            {
-                let mut id = peer.id.write().await;
-                *id = new;
-            }
-
-            if let Some(peer_channel) = write.remove(&old) {
-                write.insert(new, peer_channel);
-                println!("Peer {} renamed to {}", old, new);
-            }
-        } else {
-            println!("Peer {} not found!", old);
-        }
-
-    }
-
     pub async fn get_peers(&self) -> Vec<u16> {
         let read = self.peers_channels.read().await;
         let mut peers: Vec<u16> = read.keys().cloned().collect();
@@ -118,17 +99,9 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
         let (socket, _) = listener.accept().await.unwrap();
         let app_channel = application_channel.clone();
         let peer_port = socket.peer_addr().unwrap().port();
-        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+        let (_, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(1); // Only to use the same handler function, this will not be used
         let peer_id = Arc::new(RwLock::new(peer_port));
 
-        {
-            let mut write = peers_channels.write().await;
-            write.insert(peer_port.clone(), Peer {
-                id: peer_id.clone(),
-                channel: sender_channel_tx.clone()
-            });
-            drop(write);
-        }
         tokio::spawn(start_handler(socket, app_channel, sender_channel_rx, peer_id.clone()));
     }
 }

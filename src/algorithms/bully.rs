@@ -10,10 +10,6 @@ use crate::communication::communication::{Message, MessageBase, NodeCommunicatio
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InternalMessage {
-    Handshake {
-        id: u16,
-        leader: Option<u16>,
-    },
     Election {
         id: u16,
     },
@@ -75,12 +71,6 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                 match message.message {
                     MessageBase::Custom(internal_message) => {
                         match internal_message {
-                            InternalMessage::Handshake { id, .. } => {
-                                println!("Received Handshake from peer {}", id);
-                                let mut write = node.write().await;
-                                write.node_communication.rename_peer(message.peer_id, id).await;
-                                drop(write);
-                            }
                             InternalMessage::Election { id } => {
                                 println!("Received Election from peer {}", id);
                                 let read = node.read().await;
@@ -124,7 +114,7 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
                         }
                     }
                     MessageBase::ConnectionEstablished { peer } => {
-                        tokio::spawn(handle_handshake(peer, node.clone()));
+                        println!("Connection established with peer {}", peer);
                     }
                     _ => {
                         eprintln!("Unexpected message: {:?}", message.message)
@@ -136,28 +126,6 @@ pub async fn listen_message(node: Arc<RwLock<Node>>,
             }
         }
     }
-}
-
-pub async fn handle_handshake(peer: u16, node: Arc<RwLock<Node>>) {
-    let id: u16;
-    let leader : Option<u16>;
-    println!("Sending Handshake to peer {}", peer);
-    {
-        let lock = node.read().await;
-        id = lock.id;
-        leader = lock.leader;
-        drop(lock);
-    }
-    {
-        let mut lock = node.write().await;
-        let _ = lock.node_communication.send_message(
-            peer,
-            MessageBase::Custom(InternalMessage::Handshake { id, leader })
-        ).await;
-        drop(lock);
-    }
-
-    sleep(Duration::from_millis(1000)).await;
 }
 
 pub async fn respond_invalid_election(node: Arc<RwLock<Node>>, peer_id: u16) {
