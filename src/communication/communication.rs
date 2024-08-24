@@ -27,7 +27,6 @@ pub enum MessageBase<M>
     ConnectionFailed { peer: u16 },
     ConnectionBroken { peer: u16 },
     ConnectionEstablished { peer: u16 },
-    ForceDisconnect { peer: u16 },
     Custom(M),
 }
 
@@ -61,9 +60,8 @@ impl<M> NodeCommunication<M>
         let address = format!("0.0.0.0:{}", port);
         println!("Listening on {}", address);
         let listener = TcpListener::bind(address).await.unwrap();
-        let p_channels = self.peers_channels.clone();
         self.receiver_channel = Option::from(receiver_channel.clone());
-        tokio::spawn(accept_connections(p_channels, listener, receiver_channel.clone()));
+        tokio::spawn(accept_connections(listener, receiver_channel.clone()));
 
         for peer in peers.iter() {
             tokio::spawn(connect_to_peer(receiver_channel.clone(), self.peers_channels.clone(), peer.clone()));
@@ -92,7 +90,7 @@ impl<M> NodeCommunication<M>
     }
 }
 
-async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, listener: TcpListener, application_channel: Sender<Message<M>>)
+async fn accept_connections<M>(listener: TcpListener, application_channel: Sender<Message<M>>)
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     loop {
@@ -110,12 +108,12 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
     where M: Serialize + DeserializeOwned + Send + 'static
 {
     let mut reconnection_wait_time = 100;
-    const MAX_RECONNECTION_WAIT_TIME: u64 = 8000;
+    const MAX_RECONNECTION_WAIT_TIME: u64 = 4000;
     loop {
         let p = peer.clone();
 
         let application_channel = receiver_channel.clone();
-        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(100);
+        let (sender_channel_tx, sender_channel_rx) = tokio::sync::mpsc::channel::<MessageBase<M>>(10);
         let peer_id_lock = Arc::new(RwLock::new(p));
 
         let mut write = peers_channels.write().await;
@@ -188,14 +186,6 @@ async fn start_handler<M>(
             }
             Some(message) = sender_channel_rx.recv() => {
                 match message {
-                    MessageBase::ForceDisconnect { peer: _peer } => {
-                        {
-                            let peer_locked = peer.read().await;
-                            println!("Finishing handler to peer {}", *peer_locked);
-                            drop(peer_locked);
-                        }
-                        break;
-                    }
                     MessageBase::Custom(message) => {
                         {
                             let  _ = tx.send(message).await;
