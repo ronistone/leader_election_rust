@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,8 @@ async fn accept_connections<M>(peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>
 async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels: Arc<RwLock<HashMap<u16, Peer<M>>>>, peer: u16) -> bool
     where M: Serialize + DeserializeOwned + Send + 'static
 {
+    let mut reconnection_wait_time = 100;
+    const MAX_RECONNECTION_WAIT_TIME: u64 = 8000;
     loop {
         let p = peer.clone();
 
@@ -154,6 +157,7 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
         println!("Connecting to {}", peer_address);
         match TcpStream::connect(peer_address.clone()).await {
             Ok(socket) => {
+                reconnection_wait_time = 500;
                 start_handler(socket, app_channel, sender_channel_rx, peer_id_lock.clone()).await;
             }
             Err(err) => {
@@ -163,7 +167,10 @@ async fn connect_to_peer<M>(receiver_channel: Sender<Message<M>>, peers_channels
                 drop(write);
             }
         }
-        sleep(tokio::time::Duration::from_secs(1)).await;
+        sleep(tokio::time::Duration::from_millis(reconnection_wait_time)).await;
+        if reconnection_wait_time < MAX_RECONNECTION_WAIT_TIME {
+            reconnection_wait_time = min(reconnection_wait_time * 2, MAX_RECONNECTION_WAIT_TIME);
+        }
     }
 }
 
